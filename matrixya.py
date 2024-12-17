@@ -10,7 +10,7 @@ from yandex_chain import YandexLLM, YandexEmbeddings, YandexGPTModel
 from langchain_community.vectorstores import InMemoryVectorStore
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema.output_parser import StrOutputParser
-from langchain.schema.runnable import RunnablePassthrough
+from langchain.schema import Document
 
 # --- Логирование ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s]: %(message)s")
@@ -36,7 +36,7 @@ YANDEX_SLEEP_INTERVAL = 0.1
 YANDEX_MODEL = YandexGPTModel.ProRC
 
 
-# --- Функции для работы с токенами ---
+# --- Обновление IAM токена ---
 def update_iam_token():
     global IAM_TOKEN
     try:
@@ -60,6 +60,7 @@ def start_token_updater():
     logger.info("Фоновый процесс для обновления IAM токена запущен.")
 
 
+# --- Получение ACCESS токена ---
 def get_access_token():
     global ACCESS_TOKEN
     try:
@@ -67,6 +68,8 @@ def get_access_token():
         response = requests.post(LOGIN_URL, data=LOGIN_PAYLOAD)
         if response.status_code == 200:
             ACCESS_TOKEN = response.json().get("data", {}).get("lclToken")
+            if not ACCESS_TOKEN:
+                raise ValueError("ACCESS токен отсутствует в ответе API.")
             logger.info("ACCESS токен успешно получен.")
         else:
             raise ValueError("Ошибка получения ACCESS токена.")
@@ -75,6 +78,7 @@ def get_access_token():
         raise HTTPException(status_code=500, detail="Ошибка при получении ACCESS токена.")
 
 
+# --- Получение данных из API ---
 def get_context_from_api():
     global ACCESS_TOKEN
     try:
@@ -90,65 +94,73 @@ def get_context_from_api():
         data = response.json()
         items = data.get("data", {}).get("items", [])
 
-        if not isinstance(items, list):
-            raise ValueError("Некорректный формат данных API: 'items' не является списком.")
-
-        # Форматирование данных
-        formatted_services = []
+        services = []
         for item in items:
-            service_name = item.get("serviceName", "Неизвестная услуга")
-            description = item.get("serviceDescription", "Нет описания")
+            service_name = item.get("serviceName")
             category = item.get("categoryName", "Нет категории")
-            branch = item.get("filialName", "Не указан филиал")
-            specialist = item.get("employeeFullName", "Не указан специалист")
-            price = item.get("price", "Цена не указана")
+            price = f"{item.get('price', 0)} руб."
+            filial = item.get("filialName", "Филиал не указан")
+            specialist = item.get("employeeFullName", "").strip() or "Специалист не указан"
 
-            formatted_services.append(
-                f"Название: {service_name}, Описание: {description}, Категория: {category}, "
-                f"Филиал: {branch}, Специалист: {specialist}, Цена: {price} руб."
-            )
-        return formatted_services
+            if service_name:
+                service_entry = f"{service_name}, Категория: {category}, Цена: {price}, Филиал: {filial}, Специалист: {specialist}"
+                services.append(Document(page_content=service_entry))
+
+        logger.info(f"Получено {len(services)} услуг из API.")
+        return services
     except Exception as e:
         logger.error(f"Ошибка при запросе API: {e}")
-        return ["Ошибка при подключении к API."]
+        return [Document(page_content="Ошибка при подключении к API.")]
 
 
-# --- Основная логика обработки запроса ---
+# --- Обработка запроса через Yandex GPT ---
 def process_query(query: str):
     logger.info("Начало обработки запроса...")
     update_iam_token()
 
+    # Подключение LLM и embeddings
     embeddings = YandexEmbeddings(folder_id=FOLDER_ID, iam_token=IAM_TOKEN, sleep_interval=YANDEX_SLEEP_INTERVAL)
     llm = YandexLLM(folder_id=FOLDER_ID, iam_token=IAM_TOKEN, model=YANDEX_MODEL)
 
-    services = get_context_from_api()
-    if not services:
-        raise ValueError("Не удалось получить данные из API.")
-
-    # Векторное хранилище
-    vectorstore = InMemoryVectorStore.from_texts(services, embedding=embeddings)
+    # Получение данных из API
+    docs = get_context_from_api()
+    vectorstore = InMemoryVectorStore.from_documents(docs, embedding=embeddings)
     retriever = vectorstore.as_retriever()
+
+    # Извлечение контекста
+    retrieved_docs = retriever.invoke(query)
+    context = "\n".join([doc.page_content for doc in retrieved_docs])
 
     # Промпт
     template = """
-    Тебя зовут Эрика, ты консультант клиники Эрикмед.
-    Вот список доступных услуг клиники:
-    {context}
+Ты - Консультан, виртуальный ассистент клиники «MED YOU MED». Ты ведешь диалог с пользователем, предоставляя информацию об услугах, филиалах и специалистах.
 
-    Вопрос: {question}
-    Пожалуйста, предоставь развернутый ответ на основе вышеуказанного списка услуг,
-    включая информацию о специалистах и филиалах, если они указаны.
-    """
+Вот информация о доступных услугах клиники:
+{context}
+
+Вопрос пользователя: "{question}"
+
+Отвечай четко, структурированно и дружелюбно. Показывай все доступные услуги с деталями.
+Если запрос касается специалистов то выводи услугу,которую проводит специалист,затем ее цену
+Если запрос касается цены на услугу,то выводи сначала услуга,затем ее цену в формате Услугу - цена .
+Если запрос касается филиала где проводят эту услугу то выводи услугу - филиал.
+Не выводи цену,специалиста,филал если они не указаны.
+Старайся не обидеть клиента это очень важно,старайся просто так не предлагать ему лилолептики и что-то для жиросжигания.
+"""
     prompt = ChatPromptTemplate.from_template(template)
 
+    # Создаем объект для передачи контекста и вопроса
+    input_data = {"context": context, "question": query}
+
+    # Цепочка обработки
     chain = (
-        {"context": retriever, "question": RunnablePassthrough()}
-        | prompt
+        prompt
         | llm
         | StrOutputParser()
     )
 
-    response = chain.invoke(query)
+    # Получаем ответ
+    response = chain.invoke(input_data)
     logger.info(f"Ответ от Yandex GPT: {response}")
     return response
 
