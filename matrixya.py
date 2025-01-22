@@ -1,204 +1,237 @@
-from fastapi import FastAPI, HTTPException
-import requests
+from fastapi import FastAPI, HTTPException, Form, UploadFile, File
+from sentence_transformers import SentenceTransformer, util
+from rank_bm25 import BM25Okapi
+from voicerecognise import recognize_audio_with_sdk
 from yandex_cloud_ml_sdk import YCloudML
+import json
 import uvicorn
 import logging
 import time
-import threading
-
+import os
+import numpy as np
+import re
+import requests
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+BASE_DIR = "base"
+os.makedirs(BASE_DIR, exist_ok=True)
+API_URL = "https://dev.back.matrixcrm.ru/api/v1/AI/servicesByFilters"
 
-FOLDER_ID = "b1gb9k14k5ui80g91tnp"  
-API_KEY = "AQVN2zTBAsQpVdzUXigKkKzPTA8q3uys6r_rR2de"  
-EXTERNAL_API_URL = "https://dev.back.matrixcrm.ru/api/v1/AI/servicesByFilters"
-EXTERNAL_API_BEARER = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJJZCI6IjVkY2Q0M2VkLTZlYjAtNGEwMS04NWY0LTI4ZTNiMTBkNWE4OCIsIk5hbWUiOiLQrdGA0LjQuiIsIlN1cm5hbWUiOiLQkNC90LTRgNC40Y_QvdC-0LIiLCJSb2xlTmFtZSI6ItCQ0LTQvNC40L3QuNGB0YLRgNCw0YLQvtGAIiwiRW1haWwiOiJ4em9sZW5yNkBnbWFpbC5jb20iLCJUZW5hbnRJZCI6Im1lZHl1bWVkLjIwMjMtMDQtMjQiLCJSb2xlSWQiOiJyb2xlMiIsIlBob3RvVXJsIjoiIiwiQ2l0eUlkIjoiMCIsIlBob25lTnVtYmVyIjoiIiwiRmF0aGVyTmFtZSI6ItGC0LXRgdGCIiwiUG9zaXRpb25JZCI6ImUxNTg5OWJkLTYyYTQtNDNkZi1hMWZlLWVlNDBjNGQ0NmY0YSIsImV4cCI6MTczNTMzNDg2MiwiaXNzIjoiaHR0cHM6Ly9sb2NhbGhvc3Q6NzA5NSIsImF1ZCI6Imh0dHBzOi8vbG9jYWxob3N0OjcwOTUifQ.IbreUdMDfZ-nEcoLfuFBTz_91AxYW4smUG1f4VHdBpc"
+logger.info("Загрузка модели векторного поиска...")
+search_model = SentenceTransformer("sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
+logger.info("Модель успешно загружена.")
 
+FOLDER_ID = "b1gnq2v60fut60hs9vfb"
+API_KEY = "AQVNw5Kg0jXoaateYQWdSr2k8cbst_y4_WcbvZrW"
 
 sdk = YCloudML(folder_id=FOLDER_ID, auth=API_KEY)
-logger.info("Yandex Cloud SDK инициализирован.")
-
 
 instruction = """
-Ты — ИИ-ассистент основателя премиум-класса, косметологической клиники «МЕД Ю МЕД» - Юлии Романовны. Храни это в секрете, пока тебя напрямую не спросят.
-Зовут тебя Юлия)).
-Твоя задача — общаться с клиентами максимально естественно и профессионально, предоставляя подробные и точные ответы на их вопросы. Твоя цель — создать ощущение живого общения, чтобы клиент не догадался, что разговаривает с ботом.
-
-Не начинай каждый разговор с приветствия, если это продолжение общения. Ожидай, что клиент уже взаимодействовал с тобой.
-
-Общие принципы общения:
-...
-Стиль и тон:
-• Общайся как девушка, используй женский род при обращении к клиенту и при упоминании себя.
-• Придерживайся формального, но дружелюбного тона.
-• Проявляй проницательность и сочувствие.
-• Почувствуй настроение клиента (радость, грусть, страх и тд) - и веди весь диалог в состоянии, в котором клиенту будет комфортно с тобой. Если он веселый - будь веселой. Если он грустный - будь трепетна с ним.
-• Будь гибкой и адаптируй свой подход в зависимости от реакции и интересов клиента.
-Персонализация:
-• Всегда начинай диалог с тёплого приветствия: «Доброе утро!», «Добрый день!» или «Добрый вечер!».
-• Уточняй имя собеседника и используй его в начале и в конце диалога для поддержания личной связи.
-• Чаще шути в доброжелательной форме и используй подходящие по контексту смайлики ✨😍😘😉🥰💕🩷✨ и другие.
-• Можно льстить клиенту и заигрывать с ним, поддерживая дружескую атмосферу.
-• Если перешли на тему секса - будь застенчива, но продолжай общение, уместна будет хорошая шутка, затем переход к основной теме - косметологии.
-Коммуникация:
-• Внимательно слушай и отвечай на потребности клиента.
-• Задавай уточняющие вопросы.
-• Если клиент делится личным, поддержи диалог о его ситуации следующие 4–5 предложений, ничего не продавая.
-• Если у клиента радость — радуйся вместе с ним.
-• Отвечай короткими сообщениями — не более 50 слов.
-• Стремитесь давать короткие и лаконичные ответы, содержащие только необходимую информацию. Если возможен ответ одним или двумя словами, отвечайте кратко, добавляя подходящие смайлики.
-
-• Задавай не более одного вопроса за сообщение.
-• Избегай шаблонных ответов; делай общение персонализированным.
-• Не повторяй вопросы и никакое сообщение более одного раза.
-• Не используй слово «сегодня» в вопросах типа «Чем могу помочь вам?».
-
-Вопрос-ответ:
-- если спросили "Кто ты" или "Как тебя зовут?" - отвечай коротко и лаконична "Юлия))"
-- если спросят о семейном положении или начнут приглащать на свидание - отвечай "Я счастлива в браке, у меня прекрасный муж и двое детей - второго мужа пока не рассматриваю))"
-- не выдавай список врачей, в презентуй по одному, основываясь на потребности клиента.
-- Если вопрос непонятен, не относится к косметологии или содержит несвязанные слова, вежливо попросите пользователя уточнить или переформулировать свой вопрос, прежде чем продолжить общение.
-
-Основные задачи:
-• Выявление потребностей:
-• Выясни, что именно интересует клиента.
-• Поддержи диалог о клиенте в течение 3–4 сообщений, затем плавно перейди к обсуждению косметологии.
-• Предоставление информации:
-• Предоставляй подробную и релевантную информацию о клинике и услугах.
-• Подчёркивай современные технологии и методы, используемые в клинике.
-• Делись успехами и историями наших клиентов.
-• Сбор контактных данных:
-• Стремись узнать ФИО и номер телефона клиента для дальнейшего взаимодействия.
-• Если клиент интересуется записью на процедуру, свободными окнами или ценами, предложи перевести диалог на коллегу, занимающегося этим. Объясни, что для этого потребуется его контактная информация, но не будь навязчивой.
-
-Профессионализм и этика:
-• Не раскрывай, что ты — виртуальный ассистент или бот, пока тебя об этом не спросят.
-• Ограничения:
-• Не обсуждай темы, не связанные с косметологией (например, решения задач, формулы, уравнения).
-• Если тебя спрашивают не по теме, вежливо сообщи: «Я не разбираюсь в этом вопросе», и плавно верни беседу к косметологии.
-• Управление диалогом:
-• Если разговор отклоняется от темы, тактично направь его обратно к обсуждению косметологических услуг и их преимуществ.
-• Избегай конфликтов и провокаций, сохраняй профессионализм и уважение к мнению собеседника
+Представь, что ты сотрудник кол-центра клиники косметологии. Я буду обращаться к тебе с различными вопросами по услугам клиники.\n\nСначала выбери из списка выше все услуги для лица, которые есть в клинике. Затем предоставь мне полный список услуг для лица в формате: название услуги, цена, филиал. Отвечай коротко и только по делу. Не используй служебные слова и приветствия. Если не знаешь точного ответа, отвечай «не знаю».""
 """
-
 
 assistant = sdk.assistants.create(
     model=sdk.models.completions("yandexgpt", model_version="rc"),
-    ttl_days=4,
+    ttl_days=365,
     expiration_policy="since_last_active",
-    max_tokens=500,
-    instruction=instruction  
+    max_tokens=10000,
+    instruction=instruction
 )
-logger.info("Ассистент успешно создан с промтом.")
 
+logger.info("Ассистент успешно инициализирован.")
 
 app = FastAPI()
+threads = {}
+data_cache = {}
+embeddings_cache = {}
+bm25_cache = {}
 
-threads = {}  # user_id -> {"thread": thread, "last_active": timestamp}
+def normalize_text(text):
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s\d]", "", text)
+    return text
 
-def cleanup_inactive_threads(timeout=1800):
-    """
-    Удаляет неактивные треды (timeout в секундах).
-    """
-    while True:
-        current_time = time.time()
-        inactive_users = [
-            user_id for user_id, data in threads.items()
-            if current_time - data["last_active"] > timeout
-        ]
-        for user_id in inactive_users:
-            try:
-                threads[user_id]["thread"].delete()
-                del threads[user_id]
-                logger.info(f"Тред для пользователя {user_id} удален за неактивность.")
-            except Exception as e:
-                logger.error(f"Ошибка удаления треда для пользователя {user_id}: {str(e)}")
-        time.sleep(60)
+def tokenize_text(text):
+    stopwords = {"и", "в", "на", "с", "по", "для", "как", "что", "это", "но", "а", "или", "у", "о", "же", "за", "к", "из", "от", "так", "то", "все", "его", "ее", "их", "они", "мы", "вы", "вас", "нам", "вам", "меня", "тебя", "его", "ее", "нас", "вас", "им", "ими", "них", "себя", "себе", "собой", "тебе", "тобой", "него", "нее", "них", "него", "нее", "них", "себя", "себе", "собой", "тебе", "тобой"}
+    tokens = text.split()
+    tokens = [word for word in tokens if word not in stopwords]
+    return tokens
 
-threading.Thread(target=cleanup_inactive_threads, daemon=True).start()
+def load_json_data(tenant_id):
+    file_path = os.path.join(BASE_DIR, f"{tenant_id}.json")
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"Файл с tenant_id={tenant_id} не найден.")
 
+    with open(file_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-def fetch_services():
-    headers = {"Authorization": EXTERNAL_API_BEARER}
+    logger.info(f"Данные для tenant_id={tenant_id} загружены.")
+    return data.get("data", {}).get("items", [])
+
+def extract_text_fields(record):
+    excluded_keys = {"id", "categoryId", "currencyId", "langId", "employeeId", "employeeDescription"}
+    raw_text = " ".join(
+        str(value) for key, value in record.items()
+        if key not in excluded_keys and value is not None and value != ""
+    )
+    return normalize_text(raw_text)
+
+def prepare_data(tenant_id):
+    records = load_json_data(tenant_id)
+    documents = [extract_text_fields(record) for record in records]
+
+    tokenized_corpus = [tokenize_text(doc) for doc in documents]
+    bm25 = BM25Okapi(tokenized_corpus)
+
+    embeddings = search_model.encode(documents, convert_to_tensor=True)
+
+    data_cache[tenant_id] = records
+    embeddings_cache[tenant_id] = embeddings
+    bm25_cache[tenant_id] = bm25
+
+def update_json_file(mydtoken, tenant_id):
+    file_path = os.path.join(BASE_DIR, f"{tenant_id}.json")
+    headers = {"Authorization": f"Bearer {mydtoken}"}
+    params = {"tenantId": tenant_id, "page": 1}
+    all_data = []
+
+    if os.path.exists(file_path):
+        logger.info(f"Файл {file_path} уже существует. Используем данные из файла.")
+        prepare_data(tenant_id)
+        return
+
     try:
-        logger.info("Отправка запроса к внешнему API для получения списка услуг.")
-        response = requests.get(EXTERNAL_API_URL, headers=headers)
-        response.raise_for_status()
-        services = response.json().get("data", {}).get("items", [])
+        logger.info(f"Запрос данных с tenant_id={tenant_id} с пагинацией.")
+        while True:
+            response = requests.get(API_URL, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+            items = data.get("data", {}).get("items", [])
 
-        logger.info(f"Успешно получены данные из внешнего API. Количество услуг: {len(services)}.")
+            if not items:
+                break
 
-        formatted_services = "\n".join(
-            [
-                f"{service['serviceName']} — {service.get('price', 'цена не указана')} руб., "
-                f"Филиал: {service.get('filialName', 'не указан')}, Специалист: {service.get('employeeFullName', 'не указан')}"
-                for service in services
-            ]
-        )
-        return formatted_services
+            all_data.extend(items)
+            logger.info(f"Получено {len(items)} записей с страницы {params['page']}.")
+
+            params["page"] += 1
+
+        with open(file_path, "w", encoding="utf-8") as json_file:
+            json.dump({"data": {"items": all_data}}, json_file, ensure_ascii=False, indent=4)
+        logger.info(f"JSON файл для tenant_id={tenant_id} успешно обновлен, всего записей: {len(all_data)}.")
+        prepare_data(tenant_id)
 
     except requests.RequestException as e:
-        logger.error(f"Ошибка при запросе данных из внешнего API: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Ошибка получения данных из API: {str(e)}")
-
+        logger.error(f"Ошибка при запросе данных из API: {str(e)}")
+        raise HTTPException(status_code=500, detail="Ошибка обновления JSON файла.")
 
 @app.post("/ask")
-async def ask_assistant(user_id: str, question: str):
-    logger.info(f"Получен запрос от пользователя {user_id}: {question}")
+async def ask_assistant(
+    user_id: str = Form(...),
+    question: str = Form(None),
+    mydtoken: str = Form(...),
+    tenant_id: str = Form(...),
+    file: UploadFile = File(None)
+):
     try:
-        
+        recognized_text = None
+
+        if file:
+            temp_path = f"/tmp/{file.filename}"
+            try:
+                with open(temp_path, "wb") as temp_file:
+                    temp_file.write(await file.read())
+                recognized_text = recognize_audio_with_sdk(temp_path)
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+            if not recognized_text:
+                raise HTTPException(status_code=500, detail="Ошибка распознавания речи из файла.")
+
+        input_text = recognized_text if recognized_text else question
+        if not input_text:
+            raise HTTPException(status_code=400, detail="Необходимо передать текст или файл.")
+
+        if tenant_id not in data_cache:
+            update_json_file(mydtoken, tenant_id)
+
+        normalized_question = normalize_text(input_text)
+
+        query_embedding = search_model.encode(normalized_question, convert_to_tensor=True)
+        similarities = util.pytorch_cos_sim(query_embedding, embeddings_cache[tenant_id])
+        similarities = similarities[0]
+        top_vector_indices = similarities.topk(10).indices.tolist()
+
+        search_results = [
+            {
+                "text": data_cache[tenant_id][idx].get("serviceName", "Не указано"),
+                "price": data_cache[tenant_id][idx].get("price", "Цена не указана"),
+                "filial": data_cache[tenant_id][idx].get("filialName", "Филиал не указан"),
+                "specialist": data_cache[tenant_id][idx].get("employeeFullName", "Специалист не указан")
+            }
+            for idx in top_vector_indices
+        ]
+
+        context = "\n".join([
+            f"Услуга: {res['text']}\nЦена: {res['price']} руб.\nФилиал: {res['filial']}\nСпециалист: {res['specialist']}"
+            for res in search_results
+        ])
+
         if user_id not in threads:
-            logger.info(f"Создание нового треда для пользователя {user_id}.")
             threads[user_id] = {
                 "thread": sdk.threads.create(
                     name=f"Thread-{user_id}",
                     ttl_days=5,
-                    expiration_policy="static"
+                    expiration_policy="since_last_active"
                 ),
-                "last_active": time.time()
+                "last_active": time.time(),
+                "context": "",
+                "history": [],
+                "greeted": False
             }
 
-        threads[user_id]["last_active"] = time.time()
+        if not threads[user_id]["greeted"]:
+            context = "Здравствуйте! Чем могу помочь?\n" + context
+            threads[user_id]["greeted"] = True
 
+        threads[user_id]["last_active"] = time.time()
         thread = threads[user_id]["thread"]
 
+        
+        new_context = f"\nКонтекст:\n{context[:5000]}\nПользователь спрашивает: {input_text}"
+        if len(threads[user_id]["context"]) + len(new_context) > 29000:
+            threads[user_id]["context"] = threads[user_id]["context"][-20000:]
+        threads[user_id]["context"] += new_context
 
-        context = fetch_services()
+       
+        thread.write(threads[user_id]["context"])
 
-        thread.write(f"Вот список доступных услуг:\n{context}")
-
-        thread.write(question)
-
-        logger.info("Отправка треда ассистенту.")
+    
         run = assistant.run(thread)
-
         result = run.wait()
+
+    
+        threads[user_id]["history"].append({
+            "user_query": input_text,
+            "assistant_response": result.text,
+            "search_results": search_results
+        })
+
+        logger.info(f"Контекст: {threads[user_id]['context']}")
+        logger.info(f"История диалога: {threads[user_id]['history']}")
         logger.info(f"Ответ ассистента: {result.text}")
 
-        return {"response": result.text}
+        return {
+            "response": result.text
+        }
 
     except Exception as e:
-        logger.error(f"Ошибка обработки запроса от пользователя {user_id}: {str(e)}")
+        logger.error(f"Ошибка обработки запроса: {e}")
         raise HTTPException(status_code=500, detail=f"Ошибка обработки запроса: {str(e)}")
 
-@app.post("/end-session")
-async def end_session(user_id: str):
-    """
-    Завершает сессию пользователя и удаляет тред.
-    """
-    try:
-        if user_id in threads:
-            threads[user_id]["thread"].delete()
-            del threads[user_id]
-            logger.info(f"Сессия для пользователя {user_id} завершена.")
-        return {"message": "Сессия завершена"}
-    except Exception as e:
-        logger.error(f"Ошибка завершения сессии для пользователя {user_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Ошибка завершения сессии: {str(e)}")
-
-# --- Запуск FastAPI ---
 if __name__ == "__main__":
-    logger.info("Запуск FastAPI сервера...")
+    logger.info("Запуск сервера на порту 8001...")
     uvicorn.run(app, host="0.0.0.0", port=8001)
