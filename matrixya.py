@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 BASE_DIR = "base"
 os.makedirs(BASE_DIR, exist_ok=True)
 API_URL = "https://dev.back.matrixcrm.ru/api/v1/AI/servicesByFilters"
-OPENAI_API_KEY = "sk-proj-Kxlkan6vQKnVFr1oPlKZT3BlbkFJ0MYPTz6RHXl7NRnShBIB"
+OPENAI_API_KEY = ""
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
