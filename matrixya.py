@@ -29,7 +29,7 @@ BASE_DIR = "base"
 EMBEDDINGS_DIR = "embeddings_data"
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(EMBEDDINGS_DIR, exist_ok=True)
-API_URL = "https://dev.back.matrixcrm.ru/api/v1/AI/servicesByFilters"
+API_URL = ""
 
 YANDEX_FOLDER_ID = ""
 YANDEX_API_KEY = ""
