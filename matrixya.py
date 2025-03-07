@@ -31,8 +31,8 @@ os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(EMBEDDINGS_DIR, exist_ok=True)
 API_URL = "https://dev.back.matrixcrm.ru/api/v1/AI/servicesByFilters"
 
-YANDEX_FOLDER_ID = "b1gnq2v60fut60hs9vfb"
-YANDEX_API_KEY = "AQVNw5Kg0jXoaateYQWdSr2k8cbst_y4_WcbvZrW"
+YANDEX_FOLDER_ID = ""
+YANDEX_API_KEY = ""
 
 logger.info("Загрузка моделей...")
 search_model = SentenceTransformer("sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
